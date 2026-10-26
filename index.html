@@ -1,0 +1,669 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agenda & Présences - MSP BALMAT SANTÉ</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        msp: {
+                            50: '#f0f7fc',
+                            100: '#e0eff8',
+                            600: '#154360',
+                            700: '#1B4F72',
+                            800: '#153e59',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    
+    <!-- Script Firebase & App Logic -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+        import { getDatabase, ref, set, onValue } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js";
+
+        // Configuration Firebase
+        const firebaseConfig = {
+            apiKey: "AIzaSyArpnO__4OxLJVIG9nwrcYMS8aPJ0_A_rc",
+            authDomain: "agenda-msp-21e36.firebaseapp.com",
+            databaseURL: "https://agenda-msp-21e36-default-rtdb.europe-west1.firebasedatabase.app",
+            projectId: "agenda-msp-21e36",
+            storageBucket: "agenda-msp-21e36.firebasestorage.app",
+            messagingSenderId: "414473615009",
+            appId: "1:414473615009:web:dff45dcd5dfa4efd4de2e0",
+            measurementId: "G-YMEM701R0K"
+        };
+
+        // Initialisation Firebase
+        const app = initializeApp(firebaseConfig);
+        const db = getDatabase(app);
+
+        // Données par défaut si la base est complètement vide
+        const defaultTeam = [
+            { id: 1, name: 'Dr Dupont', role: 'Médecin' },
+            { id: 2, name: 'Claire', role: 'Sage-femme' },
+            { id: 3, name: 'Julie', role: 'Infirmier' },
+            { id: 4, name: 'Marc', role: 'Kinésithérapeute' },
+            { id: 5, name: 'Sandrine', role: 'Secrétaire' },
+            { id: 6, name: 'Thomas', role: 'Coordinateur' }
+        ];
+
+        const defaultMeetings = [
+            { 
+                id: 1, 
+                date: '2026-12-01', 
+                time: '12:30 - 14:00', 
+                title: 'Réunion de coordination pluriprofessionnelle', 
+                note: 'Prévoir l\'ordre du jour à l\'avance.\nValider les dossiers complexes.\nPoint sur les nouveaux patients.', 
+                presences: { 1: 'present', 2: 'absent', 3: 'present', 4: 'absent', 5: 'present', 6: 'present' } 
+            }
+        ];
+
+        // État applicatif global
+        let teamMembers = [];
+        let meetings = [];
+        let currentYear = new Date().getFullYear();
+
+        // Ordre strict des priorités de métiers
+        const roleOrder = ['Médecin', 'Sage-femme', 'Infirmier', 'Kinésithérapeute', 'Secrétaire', 'Coordinateur'];
+
+        // Trier l'équipe selon l'ordre strict puis alphabétique
+        function getSortedTeam() {
+            return [...teamMembers].sort((a, b) => {
+                let roleA = (a.role || '').trim();
+                let roleB = (b.role || '').trim();
+
+                let indexA = roleOrder.indexOf(roleA);
+                let indexB = roleOrder.indexOf(roleB);
+
+                if (indexA !== -1 && indexB !== -1) return indexA - indexB;
+                if (indexA !== -1) return -1;
+                if (indexB !== -1) return 1;
+
+                if (roleA !== roleB) {
+                    return roleA.localeCompare(roleB, 'fr', { sensitivity: 'base' });
+                }
+                return a.name.localeCompare(b.name, 'fr', { sensitivity: 'base' });
+            });
+        }
+
+        // Formater la date en français (ex: "2026-12-01" -> "01 déc 2026")
+        function formatDateToFrench(dateString) {
+            if (!dateString) return '';
+            const parts = dateString.split('-');
+            if (parts.length !== 3) return dateString;
+            
+            const year = parts[0];
+            const monthIndex = parseInt(parts[1], 10) - 1;
+            const day = parts[2];
+
+            const months = ['jan', 'fév', 'mars', 'avr', 'mai', 'juin', 'juil', 'août', 'sept', 'oct', 'nov', 'déc'];
+            if (monthIndex >= 0 && monthIndex < 12) {
+                return `${day} ${months[monthIndex]} ${year}`;
+            }
+            return dateString;
+        }
+
+        // Écoute des données en temps réel Firebase
+        const dbRef = ref(db, 'msp_data');
+        onValue(dbRef, (snapshot) => {
+            const data = snapshot.val();
+            if (data) {
+                teamMembers = data.team || defaultTeam;
+                
+                // Normalisation et rétrocompatibilité des données de présences
+                meetings = (data.meetings || defaultMeetings).map(m => {
+                    const normalizedPresences = {};
+                    if (m.presences) {
+                        Object.keys(m.presences).forEach(key => {
+                            const val = m.presences[key];
+                            if (val === true || val === 'present') normalizedPresences[key] = 'present';
+                            else if (val === false || val === 'absent') normalizedPresences[key] = 'absent';
+                        });
+                    }
+                    return { ...m, presences: normalizedPresences };
+                });
+            } else {
+                teamMembers = defaultTeam;
+                meetings = defaultMeetings;
+                saveToFirebase();
+            }
+
+            // Basculer l'année active si la liste des réunions change et ne contient pas l'année courante
+            if (meetings.length > 0) {
+                const years = meetings.map(m => parseInt(m.date.split('-')[0], 10));
+                if (!years.includes(currentYear)) {
+                    currentYear = Math.max(...years);
+                }
+            }
+
+            renderApp();
+            if (!document.getElementById('team-modal').classList.contains('hidden')) {
+                renderTeamList();
+            }
+        });
+
+        // Enregistrer l'état dans Firebase
+        function saveToFirebase() {
+            set(ref(db, 'msp_data'), {
+                team: teamMembers,
+                meetings: meetings
+            }).catch((error) => {
+                console.error("Erreur de sauvegarde Firebase : ", error);
+            });
+        }
+
+        // Expositions globales des fonctions pour le DOM
+        window.changeYear = function(offset) {
+            currentYear += offset;
+            renderApp();
+        };
+
+        window.toggleMeetingModal = function(meetingId = null) {
+            const modal = document.getElementById('meeting-modal');
+            const form = document.getElementById('meeting-form');
+            const modalTitle = document.getElementById('meeting-modal-title');
+            const submitBtn = document.getElementById('meeting-submit-btn');
+
+            if (meetingId) {
+                const meeting = meetings.find(m => m.id === meetingId);
+                if (meeting) {
+                    document.getElementById('meeting-id').value = meeting.id;
+                    document.getElementById('meeting-date').value = meeting.date;
+                    document.getElementById('meeting-time').value = meeting.time;
+                    document.getElementById('meeting-title').value = meeting.title;
+                    document.getElementById('meeting-note').value = meeting.note || '';
+                    modalTitle.textContent = "Modifier la réunion";
+                    submitBtn.textContent = "Enregistrer les modifications";
+                }
+            } else {
+                form.reset();
+                document.getElementById('meeting-id').value = '';
+                document.getElementById('meeting-time').value = "12:30 - 14:00";
+                
+                const today = new Date();
+                let defaultDateStr = `${currentYear}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+                document.getElementById('meeting-date').value = defaultDateStr;
+
+                modalTitle.textContent = "Planifier une nouvelle réunion";
+                submitBtn.textContent = "Créer la réunion";
+            }
+
+            modal.classList.toggle('hidden');
+        };
+
+        window.toggleTeamModal = function() {
+            document.getElementById('team-modal').classList.toggle('hidden');
+            renderTeamList();
+        };
+
+        window.addTeamMember = function(event) {
+            event.preventDefault();
+            const name = document.getElementById('member-name').value.trim();
+            const role = document.getElementById('member-role').value.trim();
+            
+            if (!name || !role) return;
+
+            const newMember = {
+                id: Date.now(),
+                name: name,
+                role: role
+            };
+
+            teamMembers.push(newMember);
+            document.getElementById('member-name').value = '';
+            document.getElementById('member-role').value = '';
+            saveToFirebase();
+        };
+
+        window.removeTeamMember = function(id) {
+            teamMembers = teamMembers.filter(m => m.id !== id);
+            saveToFirebase();
+        };
+
+        window.handleMeetingSubmit = function(event) {
+            event.preventDefault();
+            const idField = document.getElementById('meeting-id').value;
+            const date = document.getElementById('meeting-date').value;
+            const time = document.getElementById('meeting-time').value;
+            const title = document.getElementById('meeting-title').value;
+            const note = document.getElementById('meeting-note').value;
+
+            currentYear = parseInt(date.split('-')[0], 10);
+
+            if (idField) {
+                const meeting = meetings.find(m => m.id == idField);
+                if (meeting) {
+                    meeting.date = date;
+                    meeting.time = time;
+                    meeting.title = title;
+                    meeting.note = note;
+                }
+            } else {
+                const newMeeting = {
+                    id: Date.now(),
+                    date: date,
+                    time: time,
+                    title: title,
+                    note: note,
+                    presences: {}
+                };
+                meetings.push(newMeeting);
+            }
+
+            document.getElementById('meeting-form').reset();
+            window.toggleMeetingModal();
+            saveToFirebase();
+        };
+
+        window.deleteMeeting = function(meetingId) {
+            if (confirm("Êtes-vous sûr de vouloir supprimer cette réunion ?")) {
+                meetings = meetings.filter(m => m.id !== meetingId);
+                saveToFirebase();
+            }
+        };
+
+        // Gestion de l'émargement dual (present / absent / réinitialisation)
+        window.setPresenceStatus = function(meetingId, memberId, targetStatus) {
+            const meeting = meetings.find(m => m.id === meetingId);
+            if (meeting) {
+                if (!meeting.presences) meeting.presences = {};
+                
+                // Si l'utilisateur clique sur le statut déjà actif, on désélectionne (état neutre)
+                if (meeting.presences[memberId] === targetStatus) {
+                    delete meeting.presences[memberId];
+                } else {
+                    meeting.presences[memberId] = targetStatus;
+                }
+                saveToFirebase();
+            }
+        };
+
+        // Exportation au format CSV
+        window.exportToCSV = function() {
+            const sortedTeam = getSortedTeam();
+            if (meetings.length === 0) {
+                alert("Aucune réunion à exporter.");
+                return;
+            }
+
+            const sortedMeetings = [...meetings].sort((a, b) => b.date.localeCompare(a.date));
+
+            let csvRows = [];
+            let headers = ["Date", "Horaire", "Objet", "Note"];
+            sortedTeam.forEach(member => {
+                headers.push(`${member.name} (${member.role})`);
+            });
+            csvRows.push(headers.join(';'));
+
+            sortedMeetings.forEach(meeting => {
+                let row = [
+                    `"${formatDateToFrench(meeting.date)}"`,
+                    `"${meeting.time}"`,
+                    `"${meeting.title.replace(/"/g, '""')}"`,
+                    `"${(meeting.note || '').replace(/"/g, '""')}"`
+                ];
+
+                sortedTeam.forEach(member => {
+                    const status = meeting.presences ? meeting.presences[member.id] : null;
+                    let statusText = "Non renseigné";
+                    if (status === 'present') statusText = "Présent";
+                    if (status === 'absent') statusText = "Absent";
+
+                    row.push(`"${statusText}"`);
+                });
+
+                csvRows.push(row.join(';'));
+            });
+
+            const csvString = csvRows.join('\r\n');
+            const blob = new Blob(["\uFEFF" + csvString], { type: 'text/csv;charset=utf-8;' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.setAttribute('href', url);
+            a.setAttribute('download', `presences_msp_${currentYear}.csv`);
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+        };
+
+        // Rendu de la liste de l'équipe dans la modale
+        function renderTeamList() {
+            const listContainer = document.getElementById('team-list');
+            listContainer.innerHTML = '';
+            const sortedTeam = getSortedTeam();
+
+            if (sortedTeam.length === 0) {
+                listContainer.innerHTML = '<p class="text-xs text-gray-400 p-2 text-center">Aucun membre enregistré dans l\'équipe.</p>';
+                return;
+            }
+
+            sortedTeam.forEach(member => {
+                const div = document.createElement('div');
+                div.className = 'flex justify-between items-center p-2.5 bg-gray-50 hover:bg-gray-100 rounded-xl text-sm transition';
+                div.innerHTML = `
+                    <div class="flex items-center gap-2">
+                        <span class="font-semibold text-gray-800">${member.name}</span>
+                        <span class="text-xs bg-blue-100 text-[#1B4F72] px-2.5 py-0.5 rounded-full font-medium">${member.role}</span>
+                    </div>
+                    <button onclick="removeTeamMember(${member.id})" class="text-red-500 hover:text-red-700 hover:bg-red-50 p-1.5 rounded-lg font-bold transition" title="Supprimer">
+                        🗑️
+                    </button>
+                `;
+                listContainer.appendChild(div);
+            });
+        }
+
+        // Rendu principal du tableau et de l'application
+        function renderApp() {
+            document.getElementById('current-year-display').textContent = currentYear;
+
+            const headerRow = document.getElementById('table-header');
+            const bodyContainer = document.getElementById('table-body');
+            const sortedTeam = getSortedTeam();
+
+            const yearMeetings = meetings.filter(m => {
+                const mYear = parseInt(m.date.split('-')[0], 10);
+                return mYear === currentYear;
+            });
+
+            const sortedMeetings = [...yearMeetings].sort((a, b) => b.date.localeCompare(a.date));
+
+            // En-tête du tableau
+            let headerHTML = `
+                <th class="p-3.5 text-left font-semibold text-gray-700 min-w-[140px]">Date & Horaire</th>
+                <th class="p-3.5 text-left font-semibold text-gray-700 min-w-[220px]">Objet</th>
+            `;
+            sortedTeam.forEach(member => {
+                headerHTML += `
+                    <th class="p-3 text-center min-w-[110px] border-l border-gray-100">
+                        <div class="font-semibold text-gray-800 text-xs">${member.name}</div>
+                        <span class="text-[10px] font-normal text-gray-400 block">${member.role}</span>
+                    </th>
+                `;
+            });
+            headerHTML += `<th class="p-3.5 text-center font-semibold text-gray-700 border-l border-gray-100">Actions</th>`;
+            headerRow.innerHTML = headerHTML;
+
+            bodyContainer.innerHTML = '';
+            if (sortedMeetings.length === 0) {
+                bodyContainer.innerHTML = `
+                    <tr>
+                        <td colspan="${3 + sortedTeam.length}" class="p-8 text-center text-gray-400 bg-white">
+                            Aucune réunion planifiée pour l'année ${currentYear}.
+                        </td>
+                    </tr>
+                `;
+                return;
+            }
+
+            // Lignes des réunions
+            sortedMeetings.forEach(meeting => {
+                const tr = document.createElement('tr');
+                tr.className = 'hover:bg-blue-50/30 transition border-b border-gray-100 bg-white';
+                
+                const formattedDate = formatDateToFrench(meeting.date);
+                const hasNote = meeting.note && meeting.note.trim() !== '';
+
+                let noteHTML = '';
+                if (hasNote) {
+                    const escapedNote = meeting.note
+                        .replace(/&/g, "&amp;")
+                        .replace(/</g, "&lt;")
+                        .replace(/>/g, "&gt;")
+                        .replace(/\r\n/g, "<br>")
+                        .replace(/\n/g, "<br>");
+
+                    noteHTML = `
+                        <div class="relative group inline-block ml-2 align-middle">
+                            <span class="cursor-pointer text-blue-700 hover:text-blue-900 bg-blue-100/70 hover:bg-blue-100 px-2 py-0.5 rounded-md text-xs font-medium transition inline-flex items-center gap-1 border border-blue-200">
+                                📝 Note
+                            </span>
+                            <div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block w-72 p-3.5 bg-gray-900 text-white text-xs rounded-xl shadow-xl z-30 pointer-events-none text-left leading-relaxed whitespace-normal">
+                                <p class="font-semibold text-blue-300 mb-1 border-b border-gray-700 pb-1">Note de la réunion :</p>
+                                <div>${escapedNote}</div>
+                                <div class="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-gray-900"></div>
+                            </div>
+                        </div>
+                    `;
+                }
+
+                let rowHTML = `
+                    <td class="p-3.5 font-medium whitespace-nowrap">
+                        <span class="text-gray-900 font-semibold">${formattedDate}</span><br>
+                        <span class="text-xs font-normal text-gray-500">${meeting.time}</span>
+                    </td>
+                    <td class="p-3.5 text-gray-800">
+                        <div class="flex items-center flex-wrap gap-1">
+                            <span class="font-medium">${meeting.title}</span>
+                            ${noteHTML}
+                        </div>
+                    </td>
+                `;
+
+                // Intégration des boutons duals P / A par membre
+                sortedTeam.forEach(member => {
+                    const status = meeting.presences ? meeting.presences[member.id] : undefined;
+                    
+                    const isPresent = status === 'present';
+                    const isAbsent = status === 'absent';
+
+                    const presentBtnClass = isPresent 
+                        ? 'bg-emerald-600 text-white font-bold shadow ring-2 ring-emerald-600 ring-offset-1 scale-105' 
+                        : 'bg-gray-100 text-gray-400 hover:bg-emerald-50 hover:text-emerald-600';
+
+                    const absentBtnClass = isAbsent 
+                        ? 'bg-rose-600 text-white font-bold shadow ring-2 ring-rose-600 ring-offset-1 scale-105' 
+                        : 'bg-gray-100 text-gray-400 hover:bg-rose-50 hover:text-rose-600';
+
+                    rowHTML += `
+                        <td class="p-3 text-center border-l border-gray-100">
+                            <div class="inline-flex items-center justify-center p-1 bg-gray-50/80 border border-gray-200/80 rounded-xl gap-1">
+                                <button 
+                                    onclick="setPresenceStatus(${meeting.id}, ${member.id}, 'present')" 
+                                    title="Marquer Présent(e)" 
+                                    class="w-7 h-7 rounded-lg text-xs font-bold transition-all duration-150 flex items-center justify-center ${presentBtnClass}">
+                                    P
+                                </button>
+                                <button 
+                                    onclick="setPresenceStatus(${meeting.id}, ${member.id}, 'absent')" 
+                                    title="Marquer Absent(e)" 
+                                    class="w-7 h-7 rounded-lg text-xs font-bold transition-all duration-150 flex items-center justify-center ${absentBtnClass}">
+                                    A
+                                </button>
+                            </div>
+                        </td>
+                    `;
+                });
+
+                rowHTML += `
+                    <td class="p-3 text-center whitespace-nowrap space-x-1 border-l border-gray-100">
+                        <button onclick="toggleMeetingModal(${meeting.id})" title="Modifier" class="bg-blue-50 hover:bg-blue-100 text-[#1B4F72] p-2 rounded-xl text-xs transition">
+                            ✏️
+                        </button>
+                        <button onclick="deleteMeeting(${meeting.id})" title="Supprimer" class="bg-red-50 hover:bg-red-100 text-red-600 p-2 rounded-xl text-xs transition">
+                            🗑️
+                        </button>
+                    </td>
+                `;
+
+                tr.innerHTML = rowHTML;
+                bodyContainer.appendChild(tr);
+            });
+        }
+    </script>
+</head>
+<body class="bg-slate-100 text-gray-800 font-sans min-h-screen p-4 md:p-8">
+
+    <div class="max-w-7xl mx-auto space-y-6">
+        
+        <!-- En-tête avec Logo et Actions -->
+        <header class="bg-white p-6 rounded-2xl shadow-sm flex flex-col md:flex-row justify-between items-center gap-4 border border-gray-100">
+            <div class="flex items-center gap-4">
+                <!-- Logo MSP propre -->
+                <div class="h-16 flex items-center justify-center">
+                    <img src="Logo blanc MSP.png" alt="Logo MSP Balmat Santé" class="h-16 w-auto object-contain" onerror="this.onerror=null; this.parentElement.innerHTML='<div class=\'h-14 w-14 bg-[#1B4F72] text-white rounded-2xl flex items-center justify-center font-bold text-xl shadow-md\'>MSP</div>';">
+                </div>
+                <div>
+                    <h1 class="text-2xl md:text-3xl font-extrabold text-[#1B4F72]">Agenda & Présences MSP</h1>
+                    <p class="text-gray-500 text-sm font-medium">Coordination et suivi des réunions pluriprofessionnelles</p>
+                </div>
+            </div>
+            
+            <div class="flex flex-wrap gap-2.5">
+                <button onclick="exportToCSV()" class="bg-sky-600 hover:bg-sky-700 text-white font-medium px-4 py-2.5 rounded-xl transition shadow-sm flex items-center gap-2 text-sm">
+                    <span>📥</span> Exporter CSV
+                </button>
+                <button onclick="toggleMeetingModal()" class="bg-[#1B4F72] hover:bg-[#154360] text-white font-medium px-4 py-2.5 rounded-xl transition shadow-sm flex items-center gap-2 text-sm">
+                    <span>📅</span> Créer une réunion
+                </button>
+                <button onclick="toggleTeamModal()" class="bg-emerald-600 hover:bg-emerald-700 text-white font-medium px-4 py-2.5 rounded-xl transition shadow-sm flex items-center gap-2 text-sm">
+                    <span>⚙️</span> Organiser l'équipe
+                </button>
+            </div>
+        </header>
+
+        <!-- Légende et navigation d'émargement -->
+        <div class="flex flex-wrap items-center justify-between bg-white px-6 py-3.5 rounded-2xl shadow-sm border border-gray-100 text-xs text-gray-600 gap-4">
+            <div class="flex items-center gap-4 flex-wrap">
+                <span class="font-bold text-gray-700">Légende :</span>
+                <span class="inline-flex items-center gap-1.5"><span class="w-6 h-6 bg-emerald-600 text-white text-[10px] font-extrabold rounded-lg flex items-center justify-center shadow-sm">P</span> Présent(e)</span>
+                <span class="inline-flex items-center gap-1.5"><span class="w-6 h-6 bg-rose-600 text-white text-[10px] font-extrabold rounded-lg flex items-center justify-center shadow-sm">A</span> Absent(e)</span>
+                <span class="inline-flex items-center gap-1.5 text-gray-500"><span class="w-6 h-6 bg-gray-100 text-gray-400 text-[10px] font-bold rounded-lg flex items-center justify-center border border-gray-200">P/A</span> Non renseigné (cliquer sur le bouton actif pour réinitialiser)</span>
+            </div>
+        </div>
+
+        <!-- Tableau principal des présences -->
+        <section class="bg-white p-6 rounded-2xl shadow-sm space-y-4 border border-gray-100">
+            <div class="flex flex-col sm:flex-row justify-between items-center gap-4 border-b border-gray-100 pb-4">
+                <h2 class="text-xl font-bold text-[#1B4F72]">Suivi des réunions</h2>
+                
+                <!-- Sélecteur d'année -->
+                <div class="flex items-center gap-2 bg-slate-50 px-3 py-1.5 rounded-xl border border-gray-200">
+                    <button onclick="changeYear(-1)" class="w-8 h-8 flex items-center justify-center bg-white hover:bg-gray-100 rounded-lg text-gray-700 font-bold transition shadow-sm border border-gray-200" title="Année précédente">
+                        &lt;
+                    </button>
+                    <span id="current-year-display" class="font-extrabold text-lg text-[#1B4F72] px-3 min-w-[70px] text-center">----</span>
+                    <button onclick="changeYear(1)" class="w-8 h-8 flex items-center justify-center bg-white hover:bg-gray-100 rounded-lg text-gray-700 font-bold transition shadow-sm border border-gray-200" title="Année suivante">
+                        &gt;
+                    </button>
+                </div>
+            </div>
+
+            <div class="overflow-x-auto">
+                <table class="w-full text-left border-collapse" id="presence-table">
+                    <thead>
+                        <tr id="table-header" class="bg-slate-50 border-b border-gray-200 text-sm">
+                            <!-- Injecté par JavaScript -->
+                        </tr>
+                    </thead>
+                    <tbody id="table-body" class="divide-y divide-gray-100 text-sm">
+                        <!-- Injecté par JavaScript -->
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+    </div>
+
+    <!-- Modale : Créer / Modifier une réunion -->
+    <div id="meeting-modal" class="fixed inset-0 bg-slate-900/40 backdrop-blur-xs hidden flex justify-center items-center p-4 z-50">
+        <div class="bg-white rounded-2xl max-w-lg w-full p-6 space-y-5 shadow-2xl border border-gray-100">
+            <div class="flex justify-between items-center border-b pb-4">
+                <h3 id="meeting-modal-title" class="text-xl font-bold text-[#1B4F72]">Planifier une nouvelle réunion</h3>
+                <button onclick="toggleMeetingModal()" class="text-gray-400 hover:text-gray-600 text-2xl font-bold">&times;</button>
+            </div>
+
+            <form id="meeting-form" onsubmit="handleMeetingSubmit(event)" class="space-y-4">
+                <input type="hidden" id="meeting-id">
+                <div>
+                    <label class="block text-sm font-semibold text-gray-700 mb-1">Date</label>
+                    <input type="date" id="meeting-date" required class="w-full border border-gray-300 rounded-xl p-2.5 focus:ring-2 focus:ring-[#1B4F72] focus:border-[#1B4F72] outline-none transition">
+                </div>
+                <div>
+                    <label class="block text-sm font-semibold text-gray-700 mb-1">Horaires</label>
+                    <input type="text" id="meeting-time" placeholder="Ex: 12:30 - 14:00" required class="w-full border border-gray-300 rounded-xl p-2.5 focus:ring-2 focus:ring-[#1B4F72] focus:border-[#1B4F72] outline-none transition">
+                </div>
+                <div>
+                    <label class="block text-sm font-semibold text-gray-700 mb-1">Objet / Intitulé</label>
+                    <input type="text" id="meeting-title" placeholder="Ex: Réunion de coordination pluriprofessionnelle" required class="w-full border border-gray-300 rounded-xl p-2.5 focus:ring-2 focus:ring-[#1B4F72] focus:border-[#1B4F72] outline-none transition">
+                </div>
+                <div>
+                    <label class="block text-sm font-semibold text-gray-700 mb-1">Note / Ordre du jour (Optionnel)</label>
+                    <textarea id="meeting-note" rows="4" placeholder="Saisissez ici l'ordre du jour ou des remarques (retours à la ligne pris en compte)..." class="w-full border border-gray-300 rounded-xl p-2.5 focus:ring-2 focus:ring-[#1B4F72] focus:border-[#1B4F72] outline-none transition text-sm"></textarea>
+                </div>
+                <div class="flex justify-end gap-2 pt-3">
+                    <button type="button" onclick="toggleMeetingModal()" class="bg-gray-100 hover:bg-gray-200 text-gray-700 font-medium px-4 py-2.5 rounded-xl text-sm transition">
+                        Annuler
+                    </button>
+                    <button type="submit" id="meeting-submit-btn" class="bg-[#1B4F72] hover:bg-[#154360] text-white font-medium px-5 py-2.5 rounded-xl text-sm transition shadow">
+                        Créer la réunion
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Modale : Organiser l'équipe -->
+    <div id="team-modal" class="fixed inset-0 bg-slate-900/40 backdrop-blur-xs hidden flex justify-center items-center p-4 z-50">
+        <div class="bg-white rounded-2xl max-w-lg w-full p-6 space-y-6 shadow-2xl border border-gray-100">
+            <div class="flex justify-between items-center border-b pb-4">
+                <h3 class="text-xl font-bold text-[#1B4F72]">Organiser l'équipe de la MSP</h3>
+                <button onclick="toggleTeamModal()" class="text-gray-400 hover:text-gray-600 text-2xl font-bold">&times;</button>
+            </div>
+
+            <!-- Formulaire d'ajout de membre -->
+            <form onsubmit="addTeamMember(event)" class="space-y-3 bg-slate-50 p-4 rounded-xl border border-gray-200">
+                <h4 class="font-bold text-sm text-gray-800">Ajouter un professionnel de santé</h4>
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                        <label class="block text-xs font-semibold text-gray-600 mb-1">Nom / Titre</label>
+                        <input type="text" id="member-name" placeholder="Ex: Dr Martin" required class="w-full border border-gray-300 rounded-lg p-2 text-sm outline-none focus:ring-2 focus:ring-[#1B4F72] bg-white">
+                    </div>
+                    <div>
+                        <label class="block text-xs font-semibold text-gray-600 mb-1">Profession</label>
+                        <input type="text" id="member-role" list="roles-list" placeholder="Sélectionner ou saisir..." required class="w-full border border-gray-300 rounded-lg p-2 text-sm outline-none focus:ring-2 focus:ring-[#1B4F72] bg-white">
+                        <datalist id="roles-list">
+                            <option value="Médecin">
+                            <option value="Sage-femme">
+                            <option value="Infirmier">
+                            <option value="Kinésithérapeute">
+                            <option value="Secrétaire">
+                            <option value="Coordinateur">
+                            <option value="Psychologue">
+                            <option value="Diététicien">
+                            <option value="Pédicure-Podologue">
+                            <option value="Ergothérapeute">
+                        </datalist>
+                    </div>
+                </div>
+                <button type="submit" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-semibold py-2 rounded-lg text-sm transition shadow-sm">
+                    + Ajouter le membre
+                </button>
+            </form>
+
+            <!-- Liste des membres -->
+            <div>
+                <h4 class="font-bold text-sm text-gray-800 mb-2">Membres actuels</h4>
+                <div id="team-list" class="max-h-52 overflow-y-auto space-y-2 border border-gray-200 rounded-xl p-2 bg-white divide-y divide-gray-50">
+                    <!-- Injecté par JavaScript -->
+                </div>
+            </div>
+
+            <div class="flex justify-end pt-2">
+                <button onclick="toggleTeamModal()" class="bg-gray-800 hover:bg-gray-900 text-white font-medium px-5 py-2.5 rounded-xl text-sm transition">
+                    Fermer
+                </button>
+            </div>
+        </div>
+    </div>
+
+</body>
+</html>
